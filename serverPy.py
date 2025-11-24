@@ -88,6 +88,7 @@ class Player(BaseModel):
     achievements: List[Achievement] = []
     is_ready: bool = False
     consecutive_hits: int = 0
+    ships_remaining: int = 0
 
 class GameConfig(BaseModel):
     board_size: int = Field(default=10, ge=5, le=20)
@@ -129,6 +130,7 @@ class AttackResponse(BaseModel):
     sunk_ship: Optional[str] = None
     achievement_earned: Optional[Achievement] = None
     affected_positions: List[Position] = []
+    ships_remaining: int
 
 # ============= STORAGE =============
 games: Dict[str, Game] = {}
@@ -166,6 +168,8 @@ def update_board(player: Player):
                 player.board[pos.y][pos.x] = CellState.HIT
             else:
                 player.board[pos.y][pos.x] = CellState.SHIP
+    player.ships_remaining=sum(1 for ship in player.ships if not ship.is_sunk)
+
 
 def check_achievement(player: Player, achievement_type: AchievementType):
     if any(a.type == achievement_type for a in player.achievements):
@@ -276,7 +280,8 @@ def join_game(game_id: str, request: JoinGameRequest):
     
     if game.status != GameStatus.SETUP:
         raise HTTPException(status_code=400, detail="Game already started")
-    
+    if any(p.name == request.player_name for p in game.players):
+        request.player_name = request.player_name + ' 2'
     player = Player(
         name=request.player_name,
         board_size=game.config.board_size,
@@ -371,6 +376,7 @@ def attack(game_id: str, attacker_id: str, target_id: str, request: AttackReques
     # Check if hit
     for ship in target.ships:
         if pos in ship.positions and pos not in ship.hits:
+            target.board[pos.y][pos.x] = CellState.HIT
             ship.hits.append(pos)
             hit = True
             attacker.consecutive_hits += 1
@@ -392,7 +398,11 @@ def attack(game_id: str, attacker_id: str, target_id: str, request: AttackReques
             break
     
     if not hit:
+        target.board[pos.y][pos.x] = CellState.MISS
         attacker.consecutive_hits = 0
+
+        # Next player turn
+        game.current_player_index = (game.current_player_index + 1) % len(game.players)
     
     # Check if all ships sunk
     if all(ship.is_sunk for ship in target.ships):
@@ -404,14 +414,13 @@ def attack(game_id: str, attacker_id: str, target_id: str, request: AttackReques
         if not any(ship.hits for ship in attacker.ships):
             check_achievement(attacker, AchievementType.PERFECT_GAME)
     
-    # Next player turn
-    game.current_player_index = (game.current_player_index + 1) % len(game.players)
-    
+    target.ships_remaining=sum(1 for ship in target.ships if not ship.is_sunk)
     return AttackResponse(
         hit=hit,
         sunk_ship=sunk_ship_name,
         achievement_earned=achievement,
-        affected_positions=[pos]
+        affected_positions=[pos],
+        ships_remaining=sum(1 for ship in target.ships if not ship.is_sunk)
     )
 
 @app.post("/games/{game_id}/spell", response_model=AttackResponse)
